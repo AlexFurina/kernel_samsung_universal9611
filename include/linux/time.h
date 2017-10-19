@@ -40,15 +40,6 @@ static inline int timespec_compare(const struct timespec *lhs, const struct time
 	return lhs->tv_nsec - rhs->tv_nsec;
 }
 
-static inline int timeval_compare(const struct timeval *lhs, const struct timeval *rhs)
-{
-	if (lhs->tv_sec < rhs->tv_sec)
-		return -1;
-	if (lhs->tv_sec > rhs->tv_sec)
-		return 1;
-	return lhs->tv_usec - rhs->tv_usec;
-}
-
 /*
  * mktime64 - Converts date to seconds.
  * Converts Gregorian date to seconds since 1970-01-01 00:00:00.
@@ -134,29 +125,6 @@ static inline void set_normalized_timespec(struct timespec *ts, time_t sec, s64 
 	ts->tv_sec = sec;
 	ts->tv_nsec = nsec;
 }
-
-/*
- * timespec_add_safe assumes both values are positive and checks
- * for overflow. It will return TIME_T_MAX if the reutrn would be
- * smaller then either of the arguments.
- *
- * Add two timespec values and do a safety check for overflow.
- * It's assumed that both values are valid (>= 0)
- */
-static inline struct timespec timespec_add_safe(const struct timespec lhs,
-				  const struct timespec rhs)
-{
-	struct timespec res;
-
-	set_normalized_timespec(&res, lhs.tv_sec + rhs.tv_sec,
-				lhs.tv_nsec + rhs.tv_nsec);
-
-	if (res.tv_sec < lhs.tv_sec || res.tv_sec < rhs.tv_sec)
-		res.tv_sec = TIME_T_MAX;
-
-	return res;
-}
-
 
 static inline struct timespec timespec_add(struct timespec lhs,
 						struct timespec rhs)
