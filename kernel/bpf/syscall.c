@@ -95,6 +95,11 @@ static int check_uarg_tail_zero(void __user *uaddr,
 	return 0;
 }
 
+const struct bpf_map_ops bpf_map_offload_ops = {
+	.map_alloc = bpf_map_offload_map_alloc,
+	.map_free = bpf_map_offload_map_free,
+};
+
 static struct bpf_map *find_and_alloc_map(union bpf_attr *attr)
 {
 	const struct bpf_map_ops *ops;
@@ -112,6 +117,8 @@ static struct bpf_map *find_and_alloc_map(union bpf_attr *attr)
 		if (err)
 			return ERR_PTR(err);
 	}
+	if (attr->map_ifindex)
+		ops = &bpf_map_offload_ops;
 	map = ops->map_alloc(attr);
 	if (IS_ERR(map))
 		return map;
@@ -209,9 +216,17 @@ static int bpf_map_alloc_id(struct bpf_map *map)
 	return id > 0 ? 0 : id;
 }
 
-static void bpf_map_free_id(struct bpf_map *map, bool do_idr_lock)
+void bpf_map_free_id(struct bpf_map *map, bool do_idr_lock)
 {
 	unsigned long flags;
+
+	/* Offloaded maps are removed from the IDR store when their device
+	 * disappears - even if someone holds an fd to them they are unusable,
+	 * the memory is gone, all ops will fail; they are simply waiting for
+	 * refcnt to drop to be freed.
+	 */
+	if (!map->id)
+		return;
 
 	if (do_idr_lock)
 		spin_lock_irqsave(&map_idr_lock, flags);
@@ -219,6 +234,7 @@ static void bpf_map_free_id(struct bpf_map *map, bool do_idr_lock)
 		__acquire(&map_idr_lock);
 
 	idr_remove(&map_idr, map->id);
+	map->id = 0;
 
 	if (do_idr_lock)
 		spin_unlock_irqrestore(&map_idr_lock, flags);
@@ -398,7 +414,7 @@ static int bpf_obj_name_cpy(char *dst, const char *src)
 	return 0;
 }
 
-#define BPF_MAP_CREATE_LAST_FIELD numa_node
+#define BPF_MAP_CREATE_LAST_FIELD map_ifindex
 /* called via syscall */
 static int map_create(union bpf_attr *attr)
 {
@@ -424,6 +440,10 @@ static int map_create(union bpf_attr *attr)
 	map = find_and_alloc_map(attr);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
+
+	err = bpf_obj_name_cpy(map->name, attr->map_name);
+	if (err)
+		goto free_map_nouncharge;
 
 	atomic_set(&map->refcnt, 1);
 	atomic_set(&map->usercnt, 1);
@@ -582,8 +602,10 @@ static int map_lookup_elem(union bpf_attr *attr)
 	if (!value)
 		goto free_key;
 
-	if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
-	    map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH) {
+	if (bpf_map_is_dev_bound(map)) {
+		err = bpf_map_offload_lookup_elem(map, key, value);
+	} else if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
+		   map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH) {
 		err = bpf_percpu_hash_copy(map, key, value);
 	} else if (map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY) {
 		err = bpf_percpu_array_copy(map, key, value);
@@ -684,7 +706,10 @@ static int map_update_elem(union bpf_attr *attr)
 		goto free_value;
 
 	/* Need to create a kthread, thus must support schedule */
-	if (map->map_type == BPF_MAP_TYPE_CPUMAP) {
+	if (bpf_map_is_dev_bound(map)) {
+		err = bpf_map_offload_update_elem(map, key, value, attr->flags);
+		goto out;
+	} else if (map->map_type == BPF_MAP_TYPE_CPUMAP) {
 		err = map->ops->map_update_elem(map, key, value, attr->flags);
 		goto out;
 	}
@@ -762,6 +787,11 @@ static int map_delete_elem(union bpf_attr *attr)
 		goto err_put;
 	}
 
+	if (bpf_map_is_dev_bound(map)) {
+		err = bpf_map_offload_delete_elem(map, key);
+		goto out;
+	}
+
 	preempt_disable();
 	__this_cpu_inc(bpf_prog_active);
 	rcu_read_lock();
@@ -770,7 +800,7 @@ static int map_delete_elem(union bpf_attr *attr)
 	__this_cpu_dec(bpf_prog_active);
 	preempt_enable();
 	maybe_wait_bpf_programs(map);
-
+out:
 	if (!err)
 		trace_bpf_map_delete_elem(map, ufd, key);
 	kfree(key);
@@ -820,9 +850,15 @@ static int map_get_next_key(union bpf_attr *attr)
 	if (!next_key)
 		goto free_key;
 
+	if (bpf_map_is_dev_bound(map)) {
+		err = bpf_map_offload_get_next_key(map, key, next_key);
+		goto out;
+	}
+
 	rcu_read_lock();
 	err = map->ops->map_get_next_key(map, key, next_key);
 	rcu_read_unlock();
+out:
 	if (err)
 		goto free_next_key;
 
@@ -1781,6 +1817,7 @@ static int bpf_map_get_info_by_fd(struct bpf_map *map,
 	info.value_size = map->value_size;
 	info.max_entries = map->max_entries;
 	info.map_flags = map->map_flags;
+	memcpy(info.name, map->name, sizeof(map->name));
 
 	if (copy_to_user(uinfo, &info, info_len) ||
 	    put_user(info_len, &uattr->info.info_len))
