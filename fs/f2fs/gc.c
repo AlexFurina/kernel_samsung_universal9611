@@ -1014,6 +1014,7 @@ next_step:
 			if (IS_ERR(inode) || is_bad_inode(inode) ||
 					special_file(inode->i_mode)) {
 				continue;
+			}
 
 			if (!down_write_trylock(
 				&F2FS_I(inode)->i_gc_rwsem[WRITE])) {
