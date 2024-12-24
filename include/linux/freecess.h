@@ -79,12 +79,12 @@ extern int freecess_fw_version;    // record freecess framework version
 
 typedef void (*freecess_hook)(void* data, unsigned int len);
 
-int sig_report(struct task_struct *p);
+int sig_report(struct task_struct *p, bool report_pid);
 int binder_report(struct task_struct *p, int code, const char *str, int flag);
 int pkg_report(int target_uid);
 int cfb_report(int target_uid, const char *reason);
 int register_kfreecess_hook(int mod, freecess_hook hook);
 int unregister_kfreecess_hook(int mod);
-int pkg_stat_show(struct seq_file *m, void *v);
 int thread_group_is_frozen(struct task_struct* task);
 #endif
+
