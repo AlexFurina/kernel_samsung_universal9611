@@ -1,3 +1,4 @@
+
 /* Copyright (c) 2011-2014 PLUMgrid, http://plumgrid.com
  * Copyright (c) 2016 Facebook
  * Copyright (c) 2018 Covalent IO, Inc. http://covalent.io
@@ -804,19 +805,6 @@ static bool reg_is_init_pkt_pointer(const struct bpf_reg_state *reg,
 	       reg->id == 0 &&
 	       reg->off == 0 &&
 	       tnum_equals_const(reg->var_off, 0);
-}
-
-static void mark_reg_known_zero(struct bpf_verifier_env *env,
-				struct bpf_reg_state *regs, u32 regno)
-{
-	if (WARN_ON(regno >= MAX_BPF_REG)) {
-		verbose(env, "mark_reg_known_zero(env, regs, %u)\n", regno);
-		/* Something bad happened, let's kill all regs */
-		for (regno = 0; regno < MAX_BPF_REG; regno++)
-			__mark_reg_not_init(regs + regno);
-		return;
-	}
-	__mark_reg_known_zero(regs + regno);
 }
 
 /* Attempts to improve min/max values based on var_off information */
@@ -1635,7 +1623,7 @@ static int check_ctx_access(struct bpf_verifier_env *env, int insn_idx, int off,
 	};
 
 	if (env->ops->is_valid_access &&
-	    env->ops->is_valid_access(off, size, t, &info)) {
+	    env->ops->is_valid_access(off, size, t, env->prog, &info)) {
 		/* A non zero info.ctx_field_size indicates that this field is a
 		 * candidate for later verifier transformation to load the whole
 		 * field and then apply a mask when accessed with a narrower
@@ -2279,10 +2267,9 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 	case PTR_TO_PACKET:
 	case PTR_TO_PACKET_META:
 		return check_packet_access(env, regno, reg->off, access_size,
-					   zero_size_allowed);
+					zero_size_allowed);
 	case PTR_TO_FLOW_KEYS:
-		return check_flow_keys_access(env, reg->off, access_size
-					   zero_size_allowed);
+		return check_flow_keys_access(env, reg->off, access_size);
 	case PTR_TO_MAP_VALUE:
 		return check_map_access(env, regno, reg->off, access_size,
 					zero_size_allowed);
@@ -3440,7 +3427,7 @@ static int sanitize_check_bounds(struct bpf_verifier_env *env,
 		}
 		break;
 	case PTR_TO_MAP_VALUE:
-		if (check_map_access(env, dst, dst_reg->off, 1)) {
+		if (check_map_access(env, dst, dst_reg->off, 1, 1)) {
 			verbose(env, "R%d pointer arithmetic of map value goes out of range, "
 				"prohibited for !root\n", dst);
 			return -EACCES;
