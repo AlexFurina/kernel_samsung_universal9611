@@ -3517,6 +3517,12 @@ static void cgroup_pressure_release(struct kernfs_open_file *of)
 
 	psi_trigger_destroy(ctx->psi.trigger);
 }
+
+bool cgroup_psi_enabled(void)
+{
+	return 1;
+}
+
 #endif /* CONFIG_PSI */
 
 static int cgroup_freeze_show(struct seq_file *seq, void *v)
