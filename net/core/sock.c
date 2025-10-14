@@ -1561,20 +1561,12 @@ static inline void sock_lock_init(struct sock *sk)
  */
 static void sock_copy(struct sock *nsk, const struct sock *osk)
 {
-#ifdef CONFIG_SECURITY_NETWORK
-	struct sk_security_struct sksec;
-	memcpy(&sksec, nsk->sk_security, sizeof(sksec));
-#endif
 
 	memcpy(nsk, osk, offsetof(struct sock, sk_dontcopy_begin));
 
 	memcpy(&nsk->sk_dontcopy_end, &osk->sk_dontcopy_end,
 	       osk->sk_prot->obj_size - offsetof(struct sock, sk_dontcopy_end));
 
-#ifdef CONFIG_SECURITY_NETWORK
-	memcpy(nsk->sk_security, &sksec, sizeof(sksec));
-	security_sk_clone(osk, nsk);
-#endif
 }
 
 static struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority,
