@@ -72,10 +72,6 @@
 
 #include <trace/events/sched.h>
 
-#ifdef CONFIG_KSU
-#include <ksu_hook.h>
-#endif
-
 int suid_dumpable = 0;
 
 static LIST_HEAD(formats);
@@ -1714,6 +1710,14 @@ static int exec_binprm(struct linux_binprm *bprm)
 	return ret;
 }
 
+#ifdef CONFIG_KSU
+extern bool ksu_execveat_hook __read_mostly;
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+			void *envp, int *flags);
+extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+				 void *argv, void *envp, int *flags);
+#endif
+
 /*
  * sys_execve() executes a new program.
  */
@@ -1728,12 +1732,16 @@ static int do_execveat_common(int fd, struct filename *filename,
 	struct files_struct *displaced;
 	int retval;
 
+#ifdef CONFIG_KSU
+	if (unlikely(ksu_execveat_hook))
+		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+	else
+		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+#endif
+
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
 
-#ifdef CONFIG_KSU
-	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-#endif
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
 	 * set*uid() to execve() because too many poorly written programs
