@@ -58,7 +58,11 @@ static DEFINE_IDR(zram_index_idr);
 static DEFINE_MUTEX(zram_index_mutex);
 
 static int zram_major;
-static const char *default_compressor = CONFIG_ZRAM_DEF_COMP;
+#if IS_ENABLED(CONFIG_CRYPTO_LZ4)
+static const char *default_compressor = "lz4";
+#else
+static const char *default_compressor = "lzo";
+#endif
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
@@ -412,7 +416,6 @@ static int init_lru_writeback(struct zram *zram)
 		ret = -ENOMEM;
 		return ret;
 	}
-
 	/* bitmap for 2MB block */
 	bitmap_sz = (BITS_TO_LONGS(zram->nr_pages) * sizeof(long)) / NR_FALLOC_PAGES;
 	zram->blk_bitmap = kvzalloc(bitmap_sz, GFP_KERNEL);
@@ -752,7 +755,6 @@ retry:
 		spin_unlock_irqrestore(&zram->bitmap_lock, flags);
 		goto retry;
 	}
-
 	blk_idx = chunk_to_blk_idx(chunk_idx);
 	for (i = 0; i < NR_ZWBS; i++)
 		BUG_ON(test_and_set_bit(blk_idx + i, zram->bitmap));
@@ -777,7 +779,6 @@ retry:
 		spin_unlock_irqrestore(&zram->bitmap_lock, flags);
 		goto retry;
 	}
-
 	set_bit(blk_to_chunk_idx(blk_idx), zram->chunk_bitmap);
 	spin_unlock_irqrestore(&zram->bitmap_lock, flags);
 	atomic64_inc(&zram->stats.bd_count);
@@ -827,19 +828,19 @@ static void free_block_bdev(struct zram *zram, unsigned long blk_idx, bool ppr)
 		goto out;
 	zram->wb_table[blk_idx]--;
 	atomic64_dec(&zram->stats.bd_objcnt);
+	count_vm_events(SQZR_OBJCNT, -1);
 	if (ppr)
 		atomic64_dec(&zram->stats.bd_ppr_objcnt);
-	count_vm_events(SQZR_OBJCNT, -1);
 	if (zram->wb_table[blk_idx] > 0) {
 		spin_unlock_irqrestore(&zram->wb_table_lock, flags);
 		return;
 	}
 out:
 	spin_unlock_irqrestore(&zram->wb_table_lock, flags);
-	count_vm_events(SQZR_COUNT, -1);
 	was_set = test_and_clear_bit(blk_idx, zram->bitmap);
 	WARN_ON_ONCE(!was_set);
 	atomic64_dec(&zram->stats.bd_count);
+	count_vm_events(SQZR_COUNT, -1);
 	if (ppr)
 		atomic64_dec(&zram->stats.bd_ppr_count);
 	free_chunk_bdev(zram, blk_to_chunk_idx(blk_idx));
@@ -864,7 +865,6 @@ retry:
 static void free_block_bdev(struct zram *zram, unsigned long blk_idx)
 {
 	int was_set;
-
 	was_set = test_and_clear_bit(blk_idx, zram->bitmap);
 	WARN_ON_ONCE(!was_set);
 	atomic64_dec(&zram->stats.bd_count);
@@ -1229,7 +1229,7 @@ static void zram_update_max_stats(struct zram *zram)
 
 	bd_size = atomic64_read(&zram->stats.bd_size);
 	bd_ppr_count = atomic64_read(&zram->stats.bd_ppr_count);
-	bd_ppr_size = atomic64_read(&zram->stats.bd_ppr_size); 
+	bd_ppr_size = atomic64_read(&zram->stats.bd_ppr_size);
 	atomic64_set(&zram->stats.bd_max_count, bd_count);
 	atomic64_set(&zram->stats.bd_max_size, bd_size);
 	atomic64_set(&zram->stats.bd_ppr_max_count, bd_ppr_count);
@@ -1468,7 +1468,6 @@ static int zram_wbd(void *p)
 
 	while (!kthread_should_stop()) {
 		unsigned long nr_pages = 0;
-
 		wait_event_freezable(zram->wbd_wait,
 				zram->wbd_running || kthread_should_stop());
 		list_for_each_entry_safe(zram_entry, n, &zram->list, lru_list) {
@@ -1994,9 +1993,7 @@ static int read_comp_from_bdev(struct zram *zram, struct bio_vec *bvec,
 	unsigned long blk_idx = handle >> (PAGE_SHIFT * 2);
 
 	atomic64_inc(&zram->stats.bd_reads);
-#ifdef CONFIG_ZRAM_LRU_WRITEBACK
 	count_vm_event(SQZR_READ);
-#endif
 
 	bio = bio_alloc(GFP_ATOMIC, 1);
 	if (!bio)
@@ -2341,7 +2338,7 @@ static ssize_t bd_stat_store(struct device *dev,
 {
 	struct zram *zram = dev_to_zram(dev);
 	zram_reset_stats(zram);
-	return len;	
+	return len;
 }
 #endif
 #endif
@@ -2390,6 +2387,7 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
 #ifdef CONFIG_ZRAM_LRU_WRITEBACK
 	int i;
 #endif
+
 	num_pages = disksize >> PAGE_SHIFT;
 	zram->table = vzalloc(num_pages * sizeof(*zram->table));
 	if (!zram->table)
@@ -2520,7 +2518,6 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 		atomic64_inc(&zram->stats.bd_objreads);
 		if (zram_test_flag(zram, index, ZRAM_PPR))
 			atomic64_inc(&zram->stats.bd_ppr_reads);
-
 		if (!zram_test_flag(zram, index, ZRAM_EXPIRE)) {
 			zram_set_flag(zram, index, ZRAM_EXPIRE);
 			atomic64_inc(&zram->stats.bd_expire);
@@ -2564,38 +2561,15 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 
 		dst = kmap_atomic(page);
 		ret = zcomp_decompress(zstrm, src, size, dst);
-
-		/* Should NEVER happen. BUG() if it does. */
-		if (unlikely(ret)) {
-#ifdef CONFIG_PGTABLE_MAPPING
-			unsigned long pa_start = 0, pa_end = 0;
-
-			if (is_vmalloc_addr(src)) {
-				void *src_last;
-
-				src_last = src + size - 1;
-				pa_start = (vmalloc_to_pfn(src) << PAGE_SHIFT);
-				pa_start |= (unsigned long)src & ~PAGE_MASK;
-				pa_end = vmalloc_to_pfn(src_last) << PAGE_SHIFT;
-				pa_end |= (unsigned long)src_last & ~PAGE_MASK;
-				pa_end += 1;
-			} else {
-				pa_start = virt_addr_valid(src) ? virt_to_phys(src) : 0;
-				pa_end = pa_start + size;
-			}
-			pr_err("%s Decompression failed! err=%d, page=%u, len=%u, vaddr=0x%px, paddr=0x%lx--0x%lx\n",
-			       zram->compressor, ret, index, size, src, pa_start, pa_end);
-#else
-			pr_err("%s Decompression failed! err=%d, page=%u, len=%u, vaddr=0x%px\n",
-			       zram->compressor, ret, index, size, src);
-#endif
-			print_hex_dump(KERN_ERR, "", DUMP_PREFIX_OFFSET, 16, 1, src, size, 1);
-			BUG();
-		}
 		kunmap_atomic(dst);
 		zcomp_stream_put(zram->comp);
 	}
-
+	/* Should NEVER happen. BUG() if it does. */
+	if (unlikely(ret)) {
+		pr_err("Decompression failed! err=%d, page=%u, len=%u, addr=%p\n", ret, index, size, src);
+		print_hex_dump(KERN_ERR, "", DUMP_PREFIX_OFFSET, 16, 1, src, size, 1);
+		BUG();
+	}
 	zs_unmap_object(zram->mem_pool, handle);
 #ifdef CONFIG_ZRAM_LRU_WRITEBACK
 	if (zram_test_flag(zram, index, ZRAM_UNDER_PPR))
@@ -2866,16 +2840,17 @@ static void zram_bio_discard(struct zram *zram, u32 index,
  * Returns 1 if IO request was successfully submitted.
  */
 static int zram_bvec_rw(struct zram *zram, struct bio_vec *bvec, u32 index,
-			int offset, unsigned int op, struct bio *bio)
+			int offset, bool is_write, struct bio *bio)
 {
 	unsigned long start_time = jiffies;
+	int rw_acct = is_write ? REQ_OP_WRITE : REQ_OP_READ;
 	struct request_queue *q = zram->disk->queue;
 	int ret;
 
-	generic_start_io_acct(q, op, bvec->bv_len >> SECTOR_SHIFT,
+	generic_start_io_acct(q, rw_acct, bvec->bv_len >> SECTOR_SHIFT,
 			&zram->disk->part0);
 
-	if (!op_is_write(op)) {
+	if (!is_write) {
 		atomic64_inc(&zram->stats.num_reads);
 		ret = zram_bvec_read(zram, bvec, index, offset, bio);
 		flush_dcache_page(bvec->bv_page);
@@ -2884,14 +2859,14 @@ static int zram_bvec_rw(struct zram *zram, struct bio_vec *bvec, u32 index,
 		ret = zram_bvec_write(zram, bvec, index, offset, bio);
 	}
 
-	generic_end_io_acct(q, op, &zram->disk->part0, start_time);
+	generic_end_io_acct(q, rw_acct, &zram->disk->part0, start_time);
 
 	zram_slot_lock(zram, index);
 	zram_accessed(zram, index);
 	zram_slot_unlock(zram, index);
 
 	if (unlikely(ret < 0)) {
-		if (!op_is_write(op))
+		if (!is_write)
 			atomic64_inc(&zram->stats.failed_reads);
 		else
 			atomic64_inc(&zram->stats.failed_writes);
@@ -2929,7 +2904,7 @@ static void __zram_make_request(struct zram *zram, struct bio *bio)
 			bv.bv_len = min_t(unsigned int, PAGE_SIZE - offset,
 							unwritten);
 			if (zram_bvec_rw(zram, &bv, index, offset,
-					 bio_op(bio), bio) < 0)
+					op_is_write(bio_op(bio)), bio) < 0)
 				goto out;
 
 			bv.bv_offset += bv.bv_len;
@@ -3362,6 +3337,7 @@ static int zram_remove(struct zram *zram)
 	stop_lru_writeback(zram);
 #endif
 	zram_debugfs_unregister(zram);
+
 	/* Make sure all the pending I/O are finished */
 	fsync_bdev(bdev);
 	zram_reset_device(zram);
@@ -3468,7 +3444,7 @@ static int zram_size_notifier(struct notifier_block *nb,
 
 	s = (struct seq_file *)data;
 	if (s)
-		seq_printf(s, "ZramDevice:     %8lu kB\n",
+		seq_printf(s, "ZramDevice:    %8lu kB\n",
 			(unsigned long)zram_pool_total_size >> 10);
 	else
 		pr_cont("ZramDevice:%lukB ",
@@ -3514,10 +3490,11 @@ static int __init zram_init(void)
 		num_devices--;
 	}
 
+	show_mem_extra_notifier_register(&zram_size_nb);
 #ifdef CONFIG_ZRAM_LRU_WRITEBACK
 	am_app_launch_notifier_register(&zram_app_launch_nb);
 #endif
-	show_mem_extra_notifier_register(&zram_size_nb);
+
 	return 0;
 
 out_error:

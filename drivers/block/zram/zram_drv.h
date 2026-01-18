@@ -155,7 +155,6 @@ void swap_add_to_list(struct list_head *, swp_entry_t);
 void swap_writeback_list(struct zwbs **, struct list_head *);
 #endif
 
-
 struct zram {
 	struct zram_table_entry *table;
 	struct zs_pool *mem_pool;
